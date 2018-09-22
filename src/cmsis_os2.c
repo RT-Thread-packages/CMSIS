@@ -23,18 +23,18 @@
  */
 
 #include <rtthread_os2.h>
+
 #include <rthw.h>
 #include "board.h"
 
-#define DEFAULT_STACK_SIZE 512
-#define DEFAULT_TICK 5
-#define WAITING_THREAD_FLAGS 0x08
-#define MALLOC_CB 0x10
-#define MALLOC_STACK 0x04
-#define MALLOC_MEM 0x02
+#define DEFAULT_STACK_SIZE      512
+#define DEFAULT_TICK            5
+#define WAITING_THREAD_FLAGS    0x08
+#define MALLOC_CB               0x10
+#define MALLOC_STACK            0x04
+#define MALLOC_MEM              0x02
 
 static osKernelState_t kernel_state = osKernelInactive;
-
 
 static void thread_cleanup(rt_thread_t thread)
 {
@@ -53,7 +53,6 @@ static void thread_cleanup(rt_thread_t thread)
         osThreadDetach((osThreadId_t)thread);
     }
 }
-
 
 //  ==== Kernel Management Functions ====
 
@@ -2085,4 +2084,3 @@ osStatus_t osMessageQueueDelete (osMessageQueueId_t mq_id)
 
     return osOK;
 }
-

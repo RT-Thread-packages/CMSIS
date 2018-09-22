@@ -27,11 +27,9 @@
 
 #include <rtthread.h>
 
-
 #ifdef __cplusplus
 extern "C" {
 #endif
-
 
 typedef struct
 {
@@ -77,8 +75,6 @@ typedef struct
     rt_uint8_t flags;
     struct rt_messagequeue mq;
 }mq_cb_t;
-
-
 
 #ifdef __cplusplus
 }

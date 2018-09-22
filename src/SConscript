@@ -1,0 +1,12 @@
+# RT-Thread building script for component
+
+from building import *
+
+cwd = GetCurrentDir()
+src = Glob('*.cpp') + Glob('*.c')
+
+CPPPATH = [cwd + '/../include']
+
+group = DefineGroup('CMSIS', src, depend = ['PKG_USING_CMSIS', 'PKG_CMSIS_RTOS2'], CPPPATH = CPPPATH)
+
+Return('group')
