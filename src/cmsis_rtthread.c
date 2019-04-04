@@ -1,39 +1,35 @@
 /*
- * File      : rtthread.h
- * This file is part of RT-Thread RTOS
- * COPYRIGHT (C) 2006 - 2018, RT-Thread Development Team
+ * Copyright (c) 2006-2018, RT-Thread Development Team
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Change Logs:
  * Date           Author       Notes
  * 2018-04-12     misonyo      the first version
+ * 2019-04-04     misonyo      fix some bugs
  */
 
 #include <cmsis_os2.h>
 #include "cmsis_rtthread.h"
 
 #include <rthw.h>
-#include "board.h"
 
-#define DEFAULT_STACK_SIZE      512
-#define DEFAULT_TICK            5
-#define WAITING_THREAD_FLAGS    0x08
-#define MALLOC_CB               0x10
-#define MALLOC_STACK            0x04
-#define MALLOC_MEM              0x02
+/// Kernel Information
+#define API_VERSION         20010002   ///< API version (2.1.2)
+///< RT-Thread Kernel version
+#define RT_KERNEL_VERSION            (((rt_uint32_t)RT_VERSION * 10000000UL) | \
+                                   ((rt_uint32_t)RT_SUBVERSION *    10000UL) | \
+                                   ((rt_uint32_t)RT_REVISION *        1UL))
+#define KERNEL_Id     "RT-Thread"  ///< Kernel identification string
+
+#define DEFAULT_STACK_SIZE 512
+#define DEFAULT_TICK 5
+#define WAITING_THREAD_FLAGS 0x08
+#define MALLOC_CB 0x10
+#define MALLOC_STACK 0x04
+#define MALLOC_MEM 0x02
+
+extern void rt_thread_exit(void);
 
 static osKernelState_t kernel_state = osKernelInactive;
 
@@ -50,8 +46,11 @@ static void thread_cleanup(rt_thread_t thread)
     }
     else
     {
-        /* release thread resource */
-        osThreadDetach((osThreadId_t)thread);
+        if (thread_cb->flags & MALLOC_STACK)
+            rt_free(thread_cb->thread.stack_addr);
+
+        if (thread_cb->flags & MALLOC_CB)
+            rt_free(thread_cb);
     }
 }
 
@@ -59,37 +58,8 @@ static void thread_cleanup(rt_thread_t thread)
 
 /// Initialize the RTOS Kernel.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osKernelInitialize (void)
+osStatus_t osKernelInitialize(void)
 {
-    rt_hw_interrupt_disable();
-
-    /* board level initalization
-     * NOTE: please initialize heap inside board initialization.
-     */
-    rt_hw_board_init();
-
-    rt_system_heap_init((void *)HEAP_BEGIN, (void *)HEAP_END);
-
-    /* show RT-Thread version */
-    rt_show_version();
-
-    /* timer system initialization */
-    rt_system_timer_init();
-
-    /* scheduler system initialization */
-    rt_system_scheduler_init();
-
-#ifdef RT_USING_SIGNALS
-    /* signal system initialization */
-    rt_system_signal_init();
-#endif
-
-    /* timer thread initialization */
-    rt_system_timer_thread_init();
-
-    /* idle thread initialization */
-    rt_thread_idle_init();
-
     kernel_state = osKernelReady;
 
     return osOK;
@@ -100,82 +70,86 @@ osStatus_t osKernelInitialize (void)
 /// \param[out]    id_buf        pointer to buffer for retrieving kernel identification string.
 /// \param[in]     id_size       size of buffer for kernel identification string.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osKernelGetInfo (osVersion_t *version, char *id_buf, uint32_t id_size)
+osStatus_t osKernelGetInfo(osVersion_t *version, char *id_buf, uint32_t id_size)
 {
-    static const char kernel_name[] = "RT-Thread";
-
-    if ((RT_NULL == version) || (RT_NULL == id_buf))
+    if ((RT_NULL == version) || (RT_NULL == id_buf) || id_size < sizeof(KERNEL_Id))
         return osErrorParameter;
 
-    version->api = (2<<7)|(1<<4)|(0);
-    version->kernel = (RT_VERSION<<7)|(RT_SUBVERSION<<4)|(RT_REVISION);
+    version->api = API_VERSION;
+    version->kernel = RT_KERNEL_VERSION;
 
-    if(id_size < sizeof(kernel_name))
-        return osErrorParameter;
-    else
-        rt_strncpy(id_buf,kernel_name,id_size);
+    id_size = sizeof(KERNEL_Id);
+    rt_strncpy(id_buf, KERNEL_Id, id_size);
 
     return osOK;
 }
 
 /// Get the current RTOS Kernel state.
 /// \return current RTOS Kernel state.
-osKernelState_t osKernelGetState (void)
+osKernelState_t osKernelGetState(void)
 {
     return kernel_state;
 }
 
 /// Start the RTOS Kernel scheduler.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osKernelStart (void)
+osStatus_t osKernelStart(void)
 {
-    kernel_state = osKernelRunning;
+    osStatus_t state;
 
-    rt_system_scheduler_start();
+    if (osKernelReady == kernel_state)
+    {
+        kernel_state = osKernelRunning;
 
-    return osOK;
+        state = osOK;
+    }
+    else
+    {
+        state = osError;
+    }
+
+    return state;
 }
 
 /// Lock the RTOS Kernel scheduler.
 /// \return previous lock state (1 - locked, 0 - not locked, error code if negative).
-int32_t osKernelLock (void)
+int32_t osKernelLock(void)
 {
     rt_uint16_t level;
+
+    level = rt_critical_level();
 
     rt_enter_critical();
 
     kernel_state = osKernelLocked;
 
-    level = rt_critical_level();
-
-    if (1u == level)
+    if (level)
     {
-        return 0;
+        return 1;
     }
     else
     {
-        return 1;
+        return 0;
     }
 }
 
 /// Unlock the RTOS Kernel scheduler.
 /// \return previous lock state (1 - locked, 0 - not locked, error code if negative).
-int32_t osKernelUnlock (void)
+int32_t osKernelUnlock(void)
 {
     rt_uint16_t level;
 
     level = rt_critical_level();
 
-    if (0u == level)
+    if (0U == level)
     {
         return 0;
     }
     else
     {
+        rt_exit_critical();
         if (1u == level)
             kernel_state = osKernelRunning;
-
-        rt_exit_critical();
 
         return 1;
     }
@@ -184,7 +158,7 @@ int32_t osKernelUnlock (void)
 /// Restore the RTOS Kernel scheduler lock state.
 /// \param[in]     lock          lock state obtained by \ref osKernelLock or \ref osKernelUnlock.
 /// \return new lock state (1 - locked, 0 - not locked, error code if negative).
-int32_t osKernelRestoreLock (int32_t lock)
+int32_t osKernelRestoreLock(int32_t lock)
 {
     if (1u == lock)
     {
@@ -200,48 +174,24 @@ int32_t osKernelRestoreLock (int32_t lock)
     }
 }
 
-/// Suspend the RTOS Kernel scheduler.
-/// \return time in ticks, for how long the system can sleep or power-down.
-uint32_t osKernelSuspend (void)
-{
-	if (rt_thread_self() == RT_NULL)
-	{
-		return 0;
-	}
-
-    return 0;
-}
-
-/// Resume the RTOS Kernel scheduler.
-/// \param[in]     sleep_ticks   time in ticks for how long the system was in sleep or power-down mode.
-void osKernelResume (uint32_t sleep_ticks)
-{
-}
-
 /// Get the RTOS kernel tick count.
 /// \return RTOS kernel current tick count.
-uint32_t osKernelGetTickCount (void)
+uint32_t osKernelGetTickCount(void)
 {
     return (uint32_t)rt_tick_get();
 }
 
 /// Get the RTOS kernel tick frequency.
 /// \return frequency of the kernel tick.
-uint32_t osKernelGetTickFreq (void)
+uint32_t osKernelGetTickFreq(void)
 {
-    return RT_TICK_PER_SECOND;
-}
 
-/// Get the RTOS kernel system timer count.
-/// \return RTOS kernel current system timer count as 32-bit value.
-uint32_t osKernelGetSysTimerCount (void)
-{
-    return rt_tick_get();
+    return RT_TICK_PER_SECOND;
 }
 
 /// Get the RTOS kernel system timer frequency.
 /// \return frequency of the system timer.
-uint32_t osKernelGetSysTimerFreq (void)
+uint32_t osKernelGetSysTimerFreq(void)
 {
     return RT_TICK_PER_SECOND;
 }
@@ -253,46 +203,25 @@ uint32_t osKernelGetSysTimerFreq (void)
 /// \param[in]     argument      pointer that is passed to the thread function as start argument.
 /// \param[in]     attr          thread attributes; NULL: default values.
 /// \return thread ID for reference by other functions or NULL in case of error.
-osThreadId_t osThreadNew (osThreadFunc_t func, void *argument, const osThreadAttr_t *attr)
+osThreadId_t osThreadNew(osThreadFunc_t func, void *argument, const osThreadAttr_t *attr)
 {
     void *stack;
-    rt_uint8_t priority;
+    rt_uint8_t rtt_prio;
     rt_uint32_t stack_size;
     thread_cb_t *thread_cb;
     char name[RT_NAME_MAX];
-    static rt_uint16_t thread_number = 0;
+    static rt_uint16_t thread_number = 1U;
 
     /* Check parameters */
     if (RT_NULL == func)
     {
-      return RT_NULL;
+        return RT_NULL;
     }
-
-    if ((RT_NULL == attr) || (RT_NULL == attr->name))
-    	rt_snprintf(name, sizeof(name), "th%02d", thread_number ++);
-    else
-        rt_snprintf(name, sizeof(name), "%s", attr->name);
-
-    if ((RT_NULL == attr) || (osPriorityNone == attr->priority))
-    {
-    	priority = osPriorityNormal;
-    }
-    else
-    {
-        if ((attr->priority < osPriorityIdle) || (attr->priority > osPriorityISR))
-        	return RT_NULL;
-
-          priority = attr->priority;
-    }
-    if ((RT_NULL == attr) || (0 == attr->stack_size))
-    	stack_size = DEFAULT_STACK_SIZE;
-    else
-    	stack_size = attr->stack_size;
 
     if ((RT_NULL == attr) || (RT_NULL == attr->cb_mem))
     {
         thread_cb = rt_malloc(sizeof(thread_cb_t));
-        if(RT_NULL == thread_cb)
+        if (RT_NULL == thread_cb)
             return RT_NULL;
         rt_memset(thread_cb, 0, sizeof(thread_cb_t));
         thread_cb->flags |= MALLOC_CB;
@@ -308,6 +237,27 @@ osThreadId_t osThreadNew (osThreadFunc_t func, void *argument, const osThreadAtt
             return RT_NULL;
     }
 
+    if ((RT_NULL == attr) || (RT_NULL == attr->name))
+        rt_snprintf(name, sizeof(name), "th%02d", thread_number ++);
+    else
+        rt_snprintf(name, sizeof(name), "%s", attr->name);
+
+    if ((RT_NULL == attr) || (osPriorityNone == attr->priority))
+    {
+        thread_cb->prio = osPriorityNormal;
+    }
+    else
+    {
+        if ((attr->priority < osPriorityIdle) || (attr->priority > osPriorityISR))
+            return RT_NULL;
+
+        thread_cb->prio = attr->priority;
+    }
+    if ((RT_NULL == attr) || (0U == attr->stack_size))
+        stack_size = DEFAULT_STACK_SIZE;
+    else
+        stack_size = attr->stack_size;
+
     if ((RT_NULL == attr) || (RT_NULL == attr->stack_mem))
     {
         stack = rt_malloc(stack_size);
@@ -321,14 +271,14 @@ osThreadId_t osThreadNew (osThreadFunc_t func, void *argument, const osThreadAtt
     }
     else
     {
-        stack = (void*)(attr->stack_mem);
+        stack = (void *)(attr->stack_mem);
     }
 
     if ((RT_NULL != attr) && (0 != attr->attr_bits))
         thread_cb->flags |= attr->attr_bits;
 
-    rt_thread_init(&(thread_cb->thread), name, func, argument, stack,
-        stack_size, osPriorityISR - priority, DEFAULT_TICK);
+    rtt_prio = (osPriorityISR - thread_cb->prio) * RT_THREAD_PRIORITY_MAX / osPriorityISR;
+    rt_thread_init(&(thread_cb->thread), name, func, argument, stack, stack_size, rtt_prio, DEFAULT_TICK);
 
     if (thread_cb->flags & osThreadJoinable)
     {
@@ -357,14 +307,15 @@ osThreadId_t osThreadNew (osThreadFunc_t func, void *argument, const osThreadAtt
 /// Get name of a thread.
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \return name as NULL terminated string.
-const char *osThreadGetName (osThreadId_t thread_id)
+const char *osThreadGetName(osThreadId_t thread_id)
 {
     thread_cb_t *thread_cb  = (thread_cb_t *)thread_id;
 
+
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if ((RT_NULL == thread_cb) || (rt_object_get_type((rt_object_t)(&thread_cb->thread)) != RT_Object_Class_Thread))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     return thread_cb->thread.name;
@@ -372,26 +323,30 @@ const char *osThreadGetName (osThreadId_t thread_id)
 
 /// Return the thread ID of the current running thread.
 /// \return thread ID for reference by other functions or NULL in case of error.
-osThreadId_t osThreadGetId (void)
+osThreadId_t osThreadGetId(void)
 {
-    return (osThreadId_t)rt_thread_self();
+    rt_thread_t thread;
+
+    thread = rt_thread_self();
+
+    return (osThreadId_t)(thread->user_data);
 }
 
 /// Get current thread state of a thread.
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \return current thread state of the specified thread.
-osThreadState_t osThreadGetState (osThreadId_t thread_id)
+osThreadState_t osThreadGetState(osThreadId_t thread_id)
 {
     osThreadState_t state;
     thread_cb_t *thread_cb  = (thread_cb_t *)thread_id;
 
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if ((RT_NULL == thread_cb) || (rt_object_get_type((rt_object_t)(&thread_cb->thread)) != RT_Object_Class_Thread))
     {
-      return osThreadError;
+        return osThreadError;
     }
 
-    switch(thread_cb->thread.stat)
+    switch (thread_cb->thread.stat)
     {
     case RT_THREAD_INIT:
         state = osThreadInactive;
@@ -419,34 +374,34 @@ osThreadState_t osThreadGetState (osThreadId_t thread_id)
 /// Get stack size of a thread.
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \return stack size in bytes.
-uint32_t osThreadGetStackSize (osThreadId_t thread_id)
+uint32_t osThreadGetStackSize(osThreadId_t thread_id)
 {
     thread_cb_t *thread_cb  = (thread_cb_t *)thread_id;
 
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if ((RT_NULL == thread_cb) || (rt_object_get_type((rt_object_t)(&thread_cb->thread)) != RT_Object_Class_Thread))
     {
-      return 0;
+        return 0U;
     }
 
-    return thread_cb->thread.stack_size;
+    return ((uint32_t)thread_cb->thread.stack_size);
 }
 
 /// Get available stack space of a thread based on stack watermark recording during execution.
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \return remaining stack space in bytes.
-uint32_t osThreadGetStackSpace (osThreadId_t thread_id)
+uint32_t osThreadGetStackSpace(osThreadId_t thread_id)
 {
     rt_uint8_t *ptr;
     thread_cb_t *thread_cb  = (thread_cb_t *)thread_id;
 
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if ((RT_NULL == thread_cb) || (rt_object_get_type((rt_object_t)(&thread_cb->thread)) != RT_Object_Class_Thread))
     {
-      return 0;
+        return 0U;
     }
 
-    ptr = thread_cb->thread.stack_addr;
+    ptr = (rt_uint8_t *)thread_cb->thread.stack_addr;
 
     while (*ptr == '#')ptr ++;
 
@@ -457,22 +412,19 @@ uint32_t osThreadGetStackSpace (osThreadId_t thread_id)
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \param[in]     priority      new priority value for the thread function.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osThreadSetPriority (osThreadId_t thread_id, osPriority_t priority)
+osStatus_t osThreadSetPriority(osThreadId_t thread_id, osPriority_t priority)
 {
     rt_uint8_t rt_priority;
     thread_cb_t *thread_cb = (thread_cb_t *)thread_id;
 
     // Check parameters
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread) ||
-        (priority < osPriorityIdle) || (priority > osPriorityISR))
+    if ((RT_NULL == thread_cb) || (priority < osPriorityIdle) || (priority > osPriorityISR))
     {
-        if (priority == osPriorityNone)
-            priority = osPriorityNormal;
-        else
-            return osErrorParameter;
+        return osErrorParameter;
     }
 
-    rt_priority = osPriorityISR - priority;
+    thread_cb->prio = priority;
+    rt_priority = (osPriorityISR - thread_cb->prio) * RT_THREAD_PRIORITY_MAX / osPriorityISR;
 
     rt_thread_control(&(thread_cb->thread), RT_THREAD_CTRL_CHANGE_PRIORITY, &rt_priority);
 
@@ -482,25 +434,22 @@ osStatus_t osThreadSetPriority (osThreadId_t thread_id, osPriority_t priority)
 /// Get current priority of a thread.
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \return current priority value of the specified thread.
-osPriority_t osThreadGetPriority (osThreadId_t thread_id)
+osPriority_t osThreadGetPriority(osThreadId_t thread_id)
 {
-	rt_uint8_t cur_priority;
     thread_cb_t *thread_cb = (thread_cb_t *)thread_id;
 
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if ((RT_NULL == thread_cb) || (rt_object_get_type((rt_object_t)(&thread_cb->thread)) != RT_Object_Class_Thread))
     {
-      return osPriorityError;
+        return osPriorityError;
     }
 
-    cur_priority = (rt_uint8_t)osPriorityISR - thread_cb->thread.current_priority;
-
-    return (osPriority_t)cur_priority;
+    return (osPriority_t)thread_cb->prio;
 }
 
 /// Pass control to next thread that is in state \b READY.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osThreadYield (void)
+osStatus_t osThreadYield(void)
 {
     rt_thread_yield();
 
@@ -510,15 +459,15 @@ osStatus_t osThreadYield (void)
 /// Suspend execution of a thread.
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osThreadSuspend (osThreadId_t thread_id)
+osStatus_t osThreadSuspend(osThreadId_t thread_id)
 {
     rt_err_t result;
     thread_cb_t *thread_cb = (thread_cb_t *)thread_id;
 
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if (RT_NULL == thread_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     result = rt_thread_suspend(&(thread_cb->thread));
@@ -532,15 +481,15 @@ osStatus_t osThreadSuspend (osThreadId_t thread_id)
 /// Resume execution of a thread.
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osThreadResume (osThreadId_t thread_id)
+osStatus_t osThreadResume(osThreadId_t thread_id)
 {
     rt_err_t result;
     thread_cb_t *thread_cb = (thread_cb_t *)thread_id;
 
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if (RT_NULL == thread_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     result = rt_thread_resume(&(thread_cb->thread));
@@ -554,20 +503,20 @@ osStatus_t osThreadResume (osThreadId_t thread_id)
 /// Detach a thread (thread storage can be reclaimed when thread terminates).
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osThreadDetach (osThreadId_t thread_id)
+osStatus_t osThreadDetach(osThreadId_t thread_id)
 {
     thread_cb_t *thread_cb  = (thread_cb_t *)thread_id;
 
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if ((RT_NULL == thread_cb) || (rt_object_get_type((rt_object_t)(&thread_cb->thread)) != RT_Object_Class_Thread))
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     /* Check object attributes */
     if ((thread_cb->flags & osThreadJoinable) == 0)
     {
-      return osErrorResource;
+        return osErrorResource;
     }
 
     if ((thread_cb->thread.stat & RT_THREAD_STAT_MASK) == RT_THREAD_CLOSE)
@@ -600,19 +549,19 @@ osStatus_t osThreadDetach (osThreadId_t thread_id)
 /// Wait for specified thread to terminate.
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osThreadJoin (osThreadId_t thread_id)
+osStatus_t osThreadJoin(osThreadId_t thread_id)
 {
     rt_err_t result;
     thread_cb_t *thread_cb = (thread_cb_t *)thread_id;
 
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if (RT_NULL == thread_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     if (((&thread_cb->thread) == rt_thread_self()) ||
-        (0 == (thread_cb->flags & osThreadJoinable)))
+            (0 == (thread_cb->flags & osThreadJoinable)))
     {
         /* join self or join a detached thread*/
         return osErrorResource;
@@ -622,7 +571,14 @@ osStatus_t osThreadJoin (osThreadId_t thread_id)
     if (RT_EOK == result)
     {
         /* release resource */
-        osThreadDetach(thread_cb);
+        if (thread_cb->flags & osThreadJoinable)
+            rt_sem_delete(thread_cb->joinable_sem);
+
+        if (thread_cb->flags & MALLOC_STACK)
+            rt_free(thread_cb->thread.stack_addr);
+
+        if (thread_cb->flags & MALLOC_CB)
+            rt_free(thread_cb);
     }
     else
         return osError;
@@ -631,41 +587,28 @@ osStatus_t osThreadJoin (osThreadId_t thread_id)
 }
 
 /// Terminate execution of current running thread.
-__NO_RETURN void osThreadExit (void) /* doing */
+__NO_RETURN void osThreadExit(void)  /* doing */
 {
-    thread_cb_t *thread_cb;
-
-    thread_cb = (thread_cb_t *)(rt_thread_self()->user_data);
-
-    if (thread_cb->flags & osThreadJoinable)
-    {
-        rt_sem_release(thread_cb->joinable_sem);
-    }
-
-    rt_thread_detach(&(thread_cb->thread));
-    rt_schedule();
+    rt_thread_exit();
 
     RT_ASSERT(0);
-    while(1);
+    while (1);
 }
 
 /// Terminate execution of a thread.
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osThreadTerminate (osThreadId_t thread_id)
+osStatus_t osThreadTerminate(osThreadId_t thread_id)
 {
     thread_cb_t *thread_cb;
 
     thread_cb = (thread_cb_t *)(rt_thread_self()->user_data);
 
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if (RT_NULL == thread_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
-
-    /* change to detach state */
-    thread_cb->flags &= ~osThreadJoinable;
 
     rt_thread_detach(&(thread_cb->thread));
     rt_schedule();
@@ -675,9 +618,9 @@ osStatus_t osThreadTerminate (osThreadId_t thread_id)
 
 /// Get number of active threads.
 /// \return number of active threads.
-uint32_t osThreadGetCount (void)
+uint32_t osThreadGetCount(void)
 {
-    rt_uint32_t thread_count = 0;
+    rt_uint32_t thread_count = 0U;
     struct rt_object_information *info;
     struct rt_list_node *node;
 
@@ -697,12 +640,18 @@ uint32_t osThreadGetCount (void)
 /// \param[out]    thread_array  pointer to array for retrieving thread IDs.
 /// \param[in]     array_items   maximum number of items in array for retrieving thread IDs.
 /// \return number of enumerated threads.
-uint32_t osThreadEnumerate (osThreadId_t *thread_array, uint32_t array_items)
+uint32_t osThreadEnumerate(osThreadId_t *thread_array, uint32_t array_items)
 {
-    rt_uint32_t thread_count = 0;
+    rt_uint32_t thread_count = 0U;
     rt_thread_t thread;
     struct rt_object_information *info;
     struct rt_list_node *node;
+
+    /* Check parameters */
+    if ((RT_NULL == thread_array) || (0U == array_items))
+    {
+        return 0U;
+    }
 
     info = rt_object_get_information(RT_Object_Class_Thread);
 
@@ -712,6 +661,7 @@ uint32_t osThreadEnumerate (osThreadId_t *thread_array, uint32_t array_items)
         thread = rt_list_entry(node, struct rt_thread, list);
         thread_array[thread_count] = (osThreadId_t)thread;
         thread_count++;
+
         if (thread_count >= array_items)
             break;
     }
@@ -726,7 +676,7 @@ uint32_t osThreadEnumerate (osThreadId_t *thread_array, uint32_t array_items)
 /// \param[in]     thread_id     thread ID obtained by \ref osThreadNew or \ref osThreadGetId.
 /// \param[in]     flags         specifies the flags of the thread that shall be set.
 /// \return thread flags after setting or error code if highest bit set.
-uint32_t osThreadFlagsSet (osThreadId_t thread_id, uint32_t flags)
+uint32_t osThreadFlagsSet(osThreadId_t thread_id, uint32_t flags)
 {
     register rt_base_t status;
     register rt_ubase_t level;
@@ -737,9 +687,9 @@ uint32_t osThreadFlagsSet (osThreadId_t thread_id, uint32_t flags)
     thread_cb = (thread_cb_t *)(thread_id);
 
     /* Check parameters */
-    if ((RT_NULL == thread_cb) || (thread_cb->thread.type != RT_Object_Class_Thread))
+    if ((RT_NULL == thread_cb) || (rt_object_get_type((rt_object_t)(&thread_cb->thread)) != RT_Object_Class_Thread))
     {
-      return osFlagsErrorParameter;
+        return osFlagsErrorParameter;
     }
 
     level = rt_hw_interrupt_disable();
@@ -795,30 +745,42 @@ uint32_t osThreadFlagsSet (osThreadId_t thread_id, uint32_t flags)
 /// Clear the specified Thread Flags of current running thread.
 /// \param[in]     flags         specifies the flags of the thread that shall be cleared.
 /// \return thread flags before clearing or error code if highest bit set.
-uint32_t osThreadFlagsClear (uint32_t flags)
+uint32_t osThreadFlagsClear(uint32_t flags)
 {
     rt_thread_t thread = rt_thread_self();
     thread_cb_t *thread_cb;
     rt_uint32_t flag;
-    register rt_ubase_t level;
+
+    /* Check parameters */
+    if (RT_NULL == thread)
+    {
+        return osFlagsErrorParameter;
+    }
+
     thread_cb = (thread_cb_t *)(thread->user_data);
 
-    level = rt_hw_interrupt_disable();
+    rt_enter_critical();
 
     flag = thread_cb->flag_set;
     thread_cb->flag_set &= ~flags;
 
-    rt_hw_interrupt_enable(level);
+    rt_exit_critical();
 
     return flag;
 }
 
 /// Get the current Thread Flags of current running thread.
 /// \return current thread flags.
-uint32_t osThreadFlagsGet (void)
+uint32_t osThreadFlagsGet(void)
 {
     rt_thread_t thread = rt_thread_self();
     thread_cb_t *thread_cb;
+
+    /* Check parameters */
+    if (RT_NULL == thread)
+    {
+        return osFlagsErrorParameter;
+    }
 
     thread_cb = (thread_cb_t *)(thread->user_data);
 
@@ -830,13 +792,19 @@ uint32_t osThreadFlagsGet (void)
 /// \param[in]     options       specifies flags options (osFlagsXxxx).
 /// \param[in]     timeout       \ref CMSIS_RTOS_TimeOutValue or 0 in case of no time-out.
 /// \return thread flags before clearing or error code if highest bit set.
-uint32_t osThreadFlagsWait (uint32_t flags, uint32_t options, uint32_t timeout)
+uint32_t osThreadFlagsWait(uint32_t flags, uint32_t options, uint32_t timeout)
 {
     rt_uint32_t return_value;
     register rt_ubase_t level;
     register rt_base_t status = -RT_ERROR;
     rt_thread_t thread = rt_thread_self();
     thread_cb_t *thread_cb;
+
+    /* Check parameters */
+    if (RT_NULL == thread)
+    {
+        return osFlagsErrorParameter;
+    }
 
     thread->error = RT_EOK;
     thread_cb = (thread_cb_t *)(thread->user_data);
@@ -860,7 +828,7 @@ uint32_t osThreadFlagsWait (uint32_t flags, uint32_t options, uint32_t timeout)
         if (!(options & osFlagsNoClear))
             thread_cb->flag_set &= ~flags;
     }
-    else if (0 == timeout)
+    else if (0U == timeout)
     {
         rt_hw_interrupt_enable(level);
         return osFlagsErrorResource;
@@ -871,7 +839,7 @@ uint32_t osThreadFlagsWait (uint32_t flags, uint32_t options, uint32_t timeout)
         thread->event_info = options | WAITING_THREAD_FLAGS;
         rt_thread_suspend(thread);
         /* if there is a waiting timeout, active thread timer */
-        if ((timeout > 0) && (timeout != osWaitForever))
+        if ((timeout > 0U) && (timeout != osWaitForever))
         {
             /* reset the timeout of thread timer and start it */
             rt_timer_control(&(thread->thread_timer),
@@ -902,7 +870,7 @@ uint32_t osThreadFlagsWait (uint32_t flags, uint32_t options, uint32_t timeout)
 /// Wait for Timeout (Time Delay).
 /// \param[in]     ticks         \ref CMSIS_RTOS_TimeOutValue "time ticks" value
 /// \return status code that indicates the execution status of the function.
-osStatus_t osDelay (uint32_t ticks)
+osStatus_t osDelay(uint32_t ticks)
 {
     rt_thread_delay(ticks);
 
@@ -912,7 +880,7 @@ osStatus_t osDelay (uint32_t ticks)
 /// Wait until specified time.
 /// \param[in]     ticks         absolute time in ticks
 /// \return status code that indicates the execution status of the function.
-osStatus_t osDelayUntil (uint32_t ticks)
+osStatus_t osDelayUntil(uint32_t ticks)
 {
     uint64_t cur_ticks;
 
@@ -928,7 +896,7 @@ osStatus_t osDelayUntil (uint32_t ticks)
     }
     else
     {
-        rt_thread_delay(((rt_uint32_t)-1) - cur_ticks + ticks);
+        rt_thread_delay(((rt_uint32_t) - 1) - cur_ticks + ticks);
     }
 
     return osOK;
@@ -943,17 +911,17 @@ osStatus_t osDelayUntil (uint32_t ticks)
 /// \param[in]     attr          timer attributes; NULL: default values.
 /// \return timer ID for reference by other functions or NULL in case of error.
 
-osTimerId_t osTimerNew (osTimerFunc_t func, osTimerType_t type, void *argument, const osTimerAttr_t *attr)
+osTimerId_t osTimerNew(osTimerFunc_t func, osTimerType_t type, void *argument, const osTimerAttr_t *attr)
 {
     timer_cb_t *timer_cb;
     char name[RT_NAME_MAX];
-    static rt_uint16_t timer_number = 0;
+    static rt_uint16_t timer_number = 0U;
     rt_uint8_t flag = RT_TIMER_FLAG_SOFT_TIMER;
 
     /* Check parameters */
-    if ((func == NULL) || ((type != osTimerOnce) && (type != osTimerPeriodic)))
+    if ((RT_NULL == func) || ((type != osTimerOnce) && (type != osTimerPeriodic)))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     /* RT-Thread object's name can't be NULL */
@@ -965,7 +933,7 @@ osTimerId_t osTimerNew (osTimerFunc_t func, osTimerType_t type, void *argument, 
     if ((RT_NULL == attr) || (RT_NULL == attr->cb_mem))
     {
         timer_cb = rt_malloc(sizeof(timer_cb_t));
-        if(RT_NULL == timer_cb)
+        if (RT_NULL == timer_cb)
             return RT_NULL;
         rt_memset(timer_cb, 0, sizeof(timer_cb_t));
         timer_cb->flags |= MALLOC_CB;
@@ -981,7 +949,7 @@ osTimerId_t osTimerNew (osTimerFunc_t func, osTimerType_t type, void *argument, 
             return RT_NULL;
     }
 
-    if (type == osTimerPeriodic)
+    if (osTimerPeriodic == type)
     {
         flag |= RT_TIMER_FLAG_PERIODIC;
     }
@@ -994,16 +962,16 @@ osTimerId_t osTimerNew (osTimerFunc_t func, osTimerType_t type, void *argument, 
 /// Get name of a timer.
 /// \param[in]     timer_id      timer ID obtained by \ref osTimerNew.
 /// \return name as NULL terminated string.
-const char *osTimerGetName (osTimerId_t timer_id)
+const char *osTimerGetName(osTimerId_t timer_id)
 {
     timer_cb_t *timer_cb;
 
-    timer_cb = (timer_cb_t*)timer_id;
+    timer_cb = (timer_cb_t *)timer_id;
 
     /* Check parameters */
-    if ((timer_cb == RT_NULL) || (timer_cb->timer.parent.type != RT_Object_Class_Timer))
+    if ((RT_NULL == timer_cb) || (rt_object_get_type(&timer_cb->timer.parent) != RT_Object_Class_Timer))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     return timer_cb->timer.parent.name;
@@ -1013,16 +981,16 @@ const char *osTimerGetName (osTimerId_t timer_id)
 /// \param[in]     timer_id      timer ID obtained by \ref osTimerNew.
 /// \param[in]     ticks         \ref CMSIS_RTOS_TimeOutValue "time ticks" value of the timer.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osTimerStart (osTimerId_t timer_id, uint32_t ticks)
+osStatus_t osTimerStart(osTimerId_t timer_id, uint32_t ticks)
 {
     rt_err_t result;
     timer_cb_t *timer_cb;
 
-    timer_cb = (timer_cb_t*)timer_id;
+    timer_cb = (timer_cb_t *)timer_id;
     /* Check parameters */
-    if ((timer_cb == RT_NULL) || (timer_cb->timer.parent.type != RT_Object_Class_Timer) || (ticks == 0U))
+    if ((RT_NULL == timer_cb) || (ticks == 0))
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     rt_timer_control(&(timer_cb->timer), RT_TIMER_CTRL_SET_TIME, &ticks);
@@ -1037,17 +1005,17 @@ osStatus_t osTimerStart (osTimerId_t timer_id, uint32_t ticks)
 /// Stop a timer.
 /// \param[in]     timer_id      timer ID obtained by \ref osTimerNew.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osTimerStop (osTimerId_t timer_id)
+osStatus_t osTimerStop(osTimerId_t timer_id)
 {
     rt_err_t result;
     timer_cb_t *timer_cb;
 
-    timer_cb = (timer_cb_t*)timer_id;
+    timer_cb = (timer_cb_t *)timer_id;
 
     /* Check parameters */
-    if ((timer_cb == RT_NULL) || (timer_cb->timer.parent.type != RT_Object_Class_Timer))
+    if (RT_NULL == timer_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     result = rt_timer_stop(&(timer_cb->timer));
@@ -1061,39 +1029,39 @@ osStatus_t osTimerStop (osTimerId_t timer_id)
 /// Check if a timer is running.
 /// \param[in]     timer_id      timer ID obtained by \ref osTimerNew.
 /// \return 0 not running, 1 running.
-uint32_t osTimerIsRunning (osTimerId_t timer_id)
+uint32_t osTimerIsRunning(osTimerId_t timer_id)
 {
     timer_cb_t *timer_cb;
 
-    timer_cb = (timer_cb_t*)timer_id;
+    timer_cb = (timer_cb_t *)timer_id;
 
     /* Check parameters */
-    if ((timer_cb == RT_NULL) || (timer_cb->timer.parent.type != RT_Object_Class_Timer))
+    if ((RT_NULL == timer_cb) || (rt_object_get_type(&timer_cb->timer.parent) != RT_Object_Class_Timer))
     {
-      return 0;
+        return 0U;
     }
 
     if ((timer_cb->timer.parent.flag & RT_TIMER_FLAG_ACTIVATED) == 1u)
-	{
-		return 1;
-	}
-	else
-		return 0;
+    {
+        return 1;
+    }
+    else
+        return 0U;
 }
 
 /// Delete a timer.
 /// \param[in]     timer_id      timer ID obtained by \ref osTimerNew.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osTimerDelete (osTimerId_t timer_id)
+osStatus_t osTimerDelete(osTimerId_t timer_id)
 {
     timer_cb_t *timer_cb;
 
-    timer_cb = (timer_cb_t*)timer_id;
+    timer_cb = (timer_cb_t *)timer_id;
 
     /* Check parameters */
-    if ((timer_cb == RT_NULL) || (timer_cb->timer.parent.type != RT_Object_Class_Timer))
+    if (RT_NULL == timer_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     rt_timer_detach(&(timer_cb->timer));
@@ -1104,16 +1072,17 @@ osStatus_t osTimerDelete (osTimerId_t timer_id)
     return osOK;
 }
 
+#ifdef RT_USING_EVENT
 //  ==== Event Flags Management Functions ====
 
 /// Create and Initialize an Event Flags object.
 /// \param[in]     attr          event flags attributes; NULL: default values.
 /// \return event flags ID for reference by other functions or NULL in case of error.
-osEventFlagsId_t osEventFlagsNew (const osEventFlagsAttr_t *attr)
+osEventFlagsId_t osEventFlagsNew(const osEventFlagsAttr_t *attr)
 {
     char name[RT_NAME_MAX];
     event_cb_t *event_cb;
-    static rt_uint16_t event_number = 0;
+    static rt_uint16_t event_number = 0U;
 
     if ((RT_NULL == attr) || (RT_NULL == attr->name))
     {
@@ -1125,7 +1094,7 @@ osEventFlagsId_t osEventFlagsNew (const osEventFlagsAttr_t *attr)
     if ((RT_NULL == attr) || (RT_NULL == attr->cb_mem))
     {
         event_cb = rt_malloc(sizeof(event_cb_t));
-        if(RT_NULL == event_cb)
+        if (RT_NULL == event_cb)
             return RT_NULL;
         rt_memset(event_cb, 0, sizeof(event_cb_t));
         event_cb->flags |= MALLOC_CB;
@@ -1149,14 +1118,14 @@ osEventFlagsId_t osEventFlagsNew (const osEventFlagsAttr_t *attr)
 /// Get name of an Event Flags object.
 /// \param[in]     ef_id         event flags ID obtained by \ref osEventFlagsNew.
 /// \return name as NULL terminated string.
-const char *osEventFlagsGetName (osEventFlagsId_t ef_id)
+const char *osEventFlagsGetName(osEventFlagsId_t ef_id)
 {
-    event_cb_t *event_cb = (event_cb_t*)ef_id;
+    event_cb_t *event_cb = (event_cb_t *)ef_id;
 
     /* Check parameters */
-    if ((event_cb == RT_NULL) || (event_cb->event.parent.parent.type != RT_Object_Class_Event))
+    if ((RT_NULL == event_cb) || (rt_object_get_type(&event_cb->event.parent.parent) != RT_Object_Class_Event))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     return event_cb->event.parent.parent.name;
@@ -1166,21 +1135,21 @@ const char *osEventFlagsGetName (osEventFlagsId_t ef_id)
 /// \param[in]     ef_id         event flags ID obtained by \ref osEventFlagsNew.
 /// \param[in]     flags         specifies the flags that shall be set.
 /// \return event flags after setting or error code if highest bit set.
-uint32_t osEventFlagsSet (osEventFlagsId_t ef_id, uint32_t flags)
+uint32_t osEventFlagsSet(osEventFlagsId_t ef_id, uint32_t flags)
 {
     rt_err_t result;
     rt_uint32_t set_flags;
-    event_cb_t *event_cb = (event_cb_t*)ef_id;
+    event_cb_t *event_cb = (event_cb_t *)ef_id;
 
     /* Check parameters */
-    if ((event_cb == RT_NULL) || (event_cb->event.parent.parent.type != RT_Object_Class_Event))
+    if ((RT_NULL == event_cb) || (rt_object_get_type(&event_cb->event.parent.parent) != RT_Object_Class_Event))
     {
-      return ((uint32_t)osFlagsErrorParameter);
+        return ((uint32_t)osFlagsErrorParameter);
     }
 
     set_flags = event_cb->event.set |= flags;
 
-    result = rt_event_send(&(event_cb->event),flags);
+    result = rt_event_send(&(event_cb->event), flags);
 
     if (RT_EOK == result)
         return set_flags;
@@ -1192,16 +1161,16 @@ uint32_t osEventFlagsSet (osEventFlagsId_t ef_id, uint32_t flags)
 /// \param[in]     ef_id         event flags ID obtained by \ref osEventFlagsNew.
 /// \param[in]     flags         specifies the flags that shall be cleared.
 /// \return event flags before clearing or error code if highest bit set.
-uint32_t osEventFlagsClear (osEventFlagsId_t ef_id, uint32_t flags)
+uint32_t osEventFlagsClear(osEventFlagsId_t ef_id, uint32_t flags)
 {
     rt_uint32_t set_flags;
     register rt_ubase_t level;
-    event_cb_t *event_cb = (event_cb_t*)ef_id;
+    event_cb_t *event_cb = (event_cb_t *)ef_id;
 
     /* Check parameters */
-    if ((event_cb == RT_NULL) || (event_cb->event.parent.parent.type != RT_Object_Class_Event))
+    if ((RT_NULL == event_cb) || (rt_object_get_type(&event_cb->event.parent.parent) != RT_Object_Class_Event))
     {
-      return ((uint32_t)osFlagsErrorParameter);
+        return ((uint32_t)osFlagsErrorParameter);
     }
 
     set_flags = event_cb->event.set;
@@ -1218,14 +1187,14 @@ uint32_t osEventFlagsClear (osEventFlagsId_t ef_id, uint32_t flags)
 /// Get the current Event Flags.
 /// \param[in]     ef_id         event flags ID obtained by \ref osEventFlagsNew.
 /// \return current event flags.
-uint32_t osEventFlagsGet (osEventFlagsId_t ef_id)
+uint32_t osEventFlagsGet(osEventFlagsId_t ef_id)
 {
-    event_cb_t *event_cb = (event_cb_t*)ef_id;
+    event_cb_t *event_cb = (event_cb_t *)ef_id;
 
     /* Check parameters */
-    if ((event_cb == RT_NULL) || (event_cb->event.parent.parent.type != RT_Object_Class_Event))
+    if ((RT_NULL == event_cb) || (rt_object_get_type(&event_cb->event.parent.parent) != RT_Object_Class_Event))
     {
-      return 0;
+        return 0U;
     }
 
     return event_cb->event.set;
@@ -1237,17 +1206,17 @@ uint32_t osEventFlagsGet (osEventFlagsId_t ef_id)
 /// \param[in]     options       specifies flags options (osFlagsXxxx).
 /// \param[in]     timeout       \ref CMSIS_RTOS_TimeOutValue or 0 in case of no time-out.
 /// \return event flags before clearing or error code if highest bit set.
-uint32_t osEventFlagsWait (osEventFlagsId_t ef_id, uint32_t flags, uint32_t options, uint32_t timeout)
+uint32_t osEventFlagsWait(osEventFlagsId_t ef_id, uint32_t flags, uint32_t options, uint32_t timeout)
 {
     rt_err_t result;
     rt_uint32_t rt_recv;
-    rt_uint8_t rt_options = 0;
-    event_cb_t *event_cb = (event_cb_t*)ef_id;
+    rt_uint8_t rt_options = 0U;
+    event_cb_t *event_cb = (event_cb_t *)ef_id;
 
     /* Check parameters */
-    if ((event_cb == RT_NULL) || (event_cb->event.parent.parent.type != RT_Object_Class_Event))
+    if (RT_NULL == event_cb)
     {
-      return ((uint32_t)osFlagsErrorParameter);
+        return ((uint32_t)osFlagsErrorParameter);
     }
 
     if (options & osFlagsWaitAll)
@@ -1264,13 +1233,13 @@ uint32_t osEventFlagsWait (osEventFlagsId_t ef_id, uint32_t flags, uint32_t opti
         rt_options |= RT_EVENT_FLAG_CLEAR;
     }
 
-    result = rt_event_recv(&(event_cb->event),flags,(rt_uint8_t)rt_options,timeout,&rt_recv);
+    result = rt_event_recv(&(event_cb->event), flags, (rt_uint8_t)rt_options, timeout, &rt_recv);
 
     if (RT_EOK == result)
         return rt_recv;
-    else if(-RT_ETIMEOUT == result)
+    else if (-RT_ETIMEOUT == result)
     {
-        if (0 == timeout)
+        if (0U == timeout)
             return osFlagsErrorResource;
         else
             return osFlagsErrorTimeout;
@@ -1282,34 +1251,37 @@ uint32_t osEventFlagsWait (osEventFlagsId_t ef_id, uint32_t flags, uint32_t opti
 /// Delete an Event Flags object.
 /// \param[in]     ef_id         event flags ID obtained by \ref osEventFlagsNew.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osEventFlagsDelete (osEventFlagsId_t ef_id)
+osStatus_t osEventFlagsDelete(osEventFlagsId_t ef_id)
 {
-    event_cb_t *event_cb = (event_cb_t*)ef_id;
+    event_cb_t *event_cb = (event_cb_t *)ef_id;
 
     /* Check parameters */
-    if ((event_cb == RT_NULL) || (event_cb->event.parent.parent.type != RT_Object_Class_Event))
+    if (RT_NULL == event_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     rt_event_detach(&(event_cb->event));
 
-    if (event_cb->flags |= MALLOC_CB)
+    if (event_cb->flags & MALLOC_CB)
         rt_free(event_cb);
 
     return osOK;
 }
 
+#endif
+
+#ifdef RT_USING_MUTEX
 //  ==== Mutex Management Functions ====
 
 /// Create and Initialize a Mutex object.
 /// \param[in]     attr          mutex attributes; NULL: default values.
 /// \return mutex ID for reference by other functions or NULL in case of error.
-osMutexId_t osMutexNew (const osMutexAttr_t *attr)
+osMutexId_t osMutexNew(const osMutexAttr_t *attr)
 {
     char name[RT_NAME_MAX];
     mutex_cb_t *mutex_cb;
-    static rt_uint16_t mutex_number = 0;
+    static rt_uint16_t mutex_number = 0U;
 
     if ((RT_NULL == attr) || (RT_NULL == attr->name))
     {
@@ -1321,7 +1293,7 @@ osMutexId_t osMutexNew (const osMutexAttr_t *attr)
     if ((RT_NULL == attr) || (RT_NULL == attr->cb_mem))
     {
         mutex_cb = rt_malloc(sizeof(mutex_cb_t));
-        if(RT_NULL == mutex_cb)
+        if (RT_NULL == mutex_cb)
             return RT_NULL;
         rt_memset(mutex_cb, 0, sizeof(mutex_cb_t));
         mutex_cb->flags |= MALLOC_CB;
@@ -1352,14 +1324,14 @@ osMutexId_t osMutexNew (const osMutexAttr_t *attr)
 /// Get name of a Mutex object.
 /// \param[in]     mutex_id      mutex ID obtained by \ref osMutexNew.
 /// \return name as NULL terminated string.
-const char *osMutexGetName (osMutexId_t mutex_id)
+const char *osMutexGetName(osMutexId_t mutex_id)
 {
     mutex_cb_t *mutex_cb = (mutex_cb_t *)mutex_id;
 
     /* Check parameters */
-    if ((mutex_cb == RT_NULL) || (mutex_cb->mutex.parent.parent.type != RT_Object_Class_Mutex))
+    if ((RT_NULL == mutex_cb) || (rt_object_get_type(&mutex_cb->mutex.parent.parent) != RT_Object_Class_Mutex))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     return mutex_cb->mutex.parent.parent.name;
@@ -1369,15 +1341,15 @@ const char *osMutexGetName (osMutexId_t mutex_id)
 /// \param[in]     mutex_id      mutex ID obtained by \ref osMutexNew.
 /// \param[in]     timeout       \ref CMSIS_RTOS_TimeOutValue or 0 in case of no time-out.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osMutexAcquire (osMutexId_t mutex_id, uint32_t timeout)
+osStatus_t osMutexAcquire(osMutexId_t mutex_id, uint32_t timeout)
 {
     rt_err_t result;
     mutex_cb_t *mutex_cb = (mutex_cb_t *)mutex_id;
 
     /* Check parameters */
-    if ((mutex_cb == RT_NULL) || (mutex_cb->mutex.parent.parent.type != RT_Object_Class_Mutex))
+    if (RT_NULL == mutex_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     rt_enter_critical();
@@ -1394,7 +1366,7 @@ osStatus_t osMutexAcquire (osMutexId_t mutex_id, uint32_t timeout)
         return osOK;
     else if (-RT_ETIMEOUT == result)
     {
-        if (0 == timeout)
+        if (0U == timeout)
             return osErrorResource;
         else
             return osErrorTimeout;
@@ -1406,15 +1378,15 @@ osStatus_t osMutexAcquire (osMutexId_t mutex_id, uint32_t timeout)
 /// Release a Mutex that was acquired by \ref osMutexAcquire.
 /// \param[in]     mutex_id      mutex ID obtained by \ref osMutexNew.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osMutexRelease (osMutexId_t mutex_id)
+osStatus_t osMutexRelease(osMutexId_t mutex_id)
 {
     rt_err_t result;
     mutex_cb_t *mutex_cb = (mutex_cb_t *)mutex_id;
 
     /* Check parameters */
-    if ((mutex_cb == RT_NULL) || (mutex_cb->mutex.parent.parent.type != RT_Object_Class_Mutex))
+    if (RT_NULL == mutex_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     result = rt_mutex_release(&(mutex_cb->mutex));
@@ -1433,9 +1405,9 @@ osThreadId_t osMutexGetOwner(osMutexId_t mutex_id)
     mutex_cb_t *mutex_cb = (mutex_cb_t *)mutex_id;
 
     /* Check parameters */
-    if ((mutex_cb == RT_NULL) || (mutex_cb->mutex.parent.parent.type != RT_Object_Class_Mutex))
+    if ((RT_NULL == mutex_cb) || (rt_object_get_type(&mutex_cb->mutex.parent.parent) != RT_Object_Class_Mutex))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     return mutex_cb->mutex.owner;
@@ -1449,9 +1421,9 @@ osStatus_t osMutexDelete(osMutexId_t mutex_id)
     mutex_cb_t *mutex_cb = (mutex_cb_t *)mutex_id;
 
     /* Check parameters */
-    if ((mutex_cb == RT_NULL) || (mutex_cb->mutex.parent.parent.type != RT_Object_Class_Mutex))
+    if (RT_NULL == mutex_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     rt_mutex_detach(&(mutex_cb->mutex));
@@ -1462,16 +1434,19 @@ osStatus_t osMutexDelete(osMutexId_t mutex_id)
     return osOK;
 }
 
+#endif
+
+#ifdef RT_USING_SEMAPHORE
 osSemaphoreId_t osSemaphoreNew(uint32_t max_count, uint32_t initial_count, const osSemaphoreAttr_t *attr)
 {
     char name[RT_NAME_MAX];
     sem_cb_t *sem_cb;
-    static rt_uint16_t semaphore_number = 0;
+    static rt_uint16_t semaphore_number = 0U;
 
     /* Check parameters */
-    if ((0 == max_count) || (initial_count > max_count))
+    if ((0U == max_count) || (initial_count > max_count))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     if ((RT_NULL == attr) || (RT_NULL == attr->name))
@@ -1484,7 +1459,7 @@ osSemaphoreId_t osSemaphoreNew(uint32_t max_count, uint32_t initial_count, const
     if ((RT_NULL == attr) || (RT_NULL == attr->cb_mem))
     {
         sem_cb = rt_malloc(sizeof(sem_cb_t));
-        if(RT_NULL == sem_cb)
+        if (RT_NULL == sem_cb)
             return RT_NULL;
         rt_memset(sem_cb, 0, sizeof(sem_cb_t));
         sem_cb->flags |= MALLOC_CB;
@@ -1513,9 +1488,9 @@ const char *osSemaphoreGetName(osSemaphoreId_t semaphore_id)
     sem_cb_t *sem_cb = (sem_cb_t *)semaphore_id;
 
     /* Check parameters */
-    if ((RT_NULL == sem_cb) || (sem_cb->sem.parent.parent.type != RT_Object_Class_Semaphore))
+    if ((RT_NULL == sem_cb) || (rt_object_get_type(&sem_cb->sem.parent.parent) != RT_Object_Class_Semaphore))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     return sem_cb->sem.parent.parent.name;
@@ -1531,9 +1506,9 @@ osStatus_t osSemaphoreAcquire(osSemaphoreId_t semaphore_id, uint32_t timeout)
     sem_cb_t *sem_cb = (sem_cb_t *)semaphore_id;
 
     /* Check parameters */
-    if ((RT_NULL == sem_cb) || (sem_cb->sem.parent.parent.type != RT_Object_Class_Semaphore))
+    if (RT_NULL == sem_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     result = rt_sem_take(&(sem_cb->sem), timeout);
@@ -1542,7 +1517,7 @@ osStatus_t osSemaphoreAcquire(osSemaphoreId_t semaphore_id, uint32_t timeout)
         return osOK;
     else if (-RT_ETIMEOUT == result)
     {
-        if (0 == timeout)
+        if (0U == timeout)
             return osErrorResource;
         else
             return osErrorTimeout;
@@ -1560,9 +1535,9 @@ osStatus_t osSemaphoreRelease(osSemaphoreId_t semaphore_id)
     sem_cb_t *sem_cb = (sem_cb_t *)semaphore_id;
 
     /* Check parameters */
-    if ((RT_NULL == sem_cb) || (sem_cb->sem.parent.parent.type != RT_Object_Class_Semaphore))
+    if (RT_NULL == sem_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     result = rt_sem_release(&(sem_cb->sem));
@@ -1581,9 +1556,9 @@ uint32_t osSemaphoreGetCount(osSemaphoreId_t semaphore_id)
     sem_cb_t *sem_cb = (sem_cb_t *)semaphore_id;
 
     /* Check parameters */
-    if ((RT_NULL == sem_cb) || (sem_cb->sem.parent.parent.type != RT_Object_Class_Semaphore))
+    if ((RT_NULL == sem_cb) || (rt_object_get_type(&sem_cb->sem.parent.parent) != RT_Object_Class_Semaphore))
     {
-      return 0;
+        return 0U;
     }
 
     return sem_cb->sem.value;
@@ -1597,9 +1572,9 @@ osStatus_t osSemaphoreDelete(osSemaphoreId_t semaphore_id)
     sem_cb_t *sem_cb = (sem_cb_t *)semaphore_id;
 
     /* Check parameters */
-    if ((RT_NULL == sem_cb) || (sem_cb->sem.parent.parent.type != RT_Object_Class_Semaphore))
+    if (RT_NULL == sem_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     rt_sem_detach(&(sem_cb->sem));
@@ -1610,8 +1585,11 @@ osStatus_t osSemaphoreDelete(osSemaphoreId_t semaphore_id)
     return osOK;
 }
 
-//  ==== Memory Pool Management Functions ====
+#endif
+
 #ifdef RT_USING_MEMPOOL
+//  ==== Memory Pool Management Functions ====
+
 /// Create and Initialize a Memory Pool object.
 /// \param[in]     block_count   maximum number of memory blocks in memory pool.
 /// \param[in]     block_size    memory block size in bytes.
@@ -1623,12 +1601,12 @@ osMemoryPoolId_t osMemoryPoolNew(uint32_t block_count, uint32_t block_size, cons
     void *mp_addr;
     rt_uint32_t mp_size;
     mempool_cb_t *mempool_cb;
-    static rt_uint16_t memory_pool_number = 0;
+    static rt_uint16_t memory_pool_number = 0U;
 
     /* Check parameters */
-    if ((0 == block_count) || (0 == block_size))
+    if ((0U == block_count) || (0U == block_size))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     if ((RT_NULL == attr) || (RT_NULL == attr->name))
@@ -1641,7 +1619,7 @@ osMemoryPoolId_t osMemoryPoolNew(uint32_t block_count, uint32_t block_size, cons
     if ((RT_NULL == attr) || (RT_NULL == attr->cb_mem))
     {
         mempool_cb = rt_malloc(sizeof(mempool_cb_t));
-        if(RT_NULL == mempool_cb)
+        if (RT_NULL == mempool_cb)
             return RT_NULL;
         rt_memset(mempool_cb, 0, sizeof(mempool_cb_t));
         mempool_cb->flags |= MALLOC_CB;
@@ -1661,7 +1639,7 @@ osMemoryPoolId_t osMemoryPoolNew(uint32_t block_count, uint32_t block_size, cons
     {
         block_size = RT_ALIGN(block_size, RT_ALIGN_SIZE);
         mp_size = (block_size + sizeof(rt_uint8_t *)) * block_count;
-        mp_addr = rt_malloc((block_size + sizeof(rt_uint8_t *)) *block_count);
+        mp_addr = rt_malloc((block_size + sizeof(rt_uint8_t *)) * block_count);
 
         if (RT_NULL == mp_addr)
         {
@@ -1673,7 +1651,7 @@ osMemoryPoolId_t osMemoryPoolNew(uint32_t block_count, uint32_t block_size, cons
     }
     else
     {
-        mp_addr = (void*)(attr->mp_mem);
+        mp_addr = (void *)(attr->mp_mem);
         mp_size = attr->mp_size;
     }
 
@@ -1685,14 +1663,14 @@ osMemoryPoolId_t osMemoryPoolNew(uint32_t block_count, uint32_t block_size, cons
 /// Get name of a Memory Pool object.
 /// \param[in]     mp_id         memory pool ID obtained by \ref osMemoryPoolNew.
 /// \return name as NULL terminated string.
-const char *osMemoryPoolGetName (osMemoryPoolId_t mp_id)
+const char *osMemoryPoolGetName(osMemoryPoolId_t mp_id)
 {
     mempool_cb_t *mempool_cb = (mempool_cb_t *)mp_id;
 
     /* Check parameters */
-    if ((RT_NULL == mempool_cb) || (mempool_cb->mp.parent.type != RT_Object_Class_MemPool))
+    if ((RT_NULL == mempool_cb) || (rt_object_get_type(&mempool_cb->mp.parent) != RT_Object_Class_MemPool))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     return mempool_cb->mp.parent.name;
@@ -1702,14 +1680,14 @@ const char *osMemoryPoolGetName (osMemoryPoolId_t mp_id)
 /// \param[in]     mp_id         memory pool ID obtained by \ref osMemoryPoolNew.
 /// \param[in]     timeout       \ref CMSIS_RTOS_TimeOutValue or 0 in case of no time-out.
 /// \return address of the allocated memory block or NULL in case of no memory is available.
-void *osMemoryPoolAlloc (osMemoryPoolId_t mp_id, uint32_t timeout)
+void *osMemoryPoolAlloc(osMemoryPoolId_t mp_id, uint32_t timeout)
 {
     mempool_cb_t *mempool_cb = (mempool_cb_t *)mp_id;
 
     /* Check parameters */
-    if ((RT_NULL == mempool_cb) || (mempool_cb->mp.parent.type != RT_Object_Class_MemPool))
+    if (RT_NULL == mempool_cb)
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     return rt_mp_alloc(&(mempool_cb->mp), timeout);
@@ -1719,17 +1697,17 @@ void *osMemoryPoolAlloc (osMemoryPoolId_t mp_id, uint32_t timeout)
 /// \param[in]     mp_id         memory pool ID obtained by \ref osMemoryPoolNew.
 /// \param[in]     block         address of the allocated memory block to be returned to the memory pool.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osMemoryPoolFree (osMemoryPoolId_t mp_id, void *block)
+osStatus_t osMemoryPoolFree(osMemoryPoolId_t mp_id, void *block)
 {
     mempool_cb_t *mempool_cb = (mempool_cb_t *)mp_id;
 
     /* Check parameters */
-    if ((RT_NULL == mempool_cb) || (mempool_cb->mp.parent.type != RT_Object_Class_MemPool))
+    if (RT_NULL == mempool_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
-	rt_mp_free(block);
+    rt_mp_free(block);
 
     return osOK;
 }
@@ -1737,14 +1715,14 @@ osStatus_t osMemoryPoolFree (osMemoryPoolId_t mp_id, void *block)
 /// Get maximum number of memory blocks in a Memory Pool.
 /// \param[in]     mp_id         memory pool ID obtained by \ref osMemoryPoolNew.
 /// \return maximum number of memory blocks.
-uint32_t osMemoryPoolGetCapacity (osMemoryPoolId_t mp_id)
+uint32_t osMemoryPoolGetCapacity(osMemoryPoolId_t mp_id)
 {
     mempool_cb_t *mempool_cb = (mempool_cb_t *)mp_id;
 
     /* Check parameters */
-    if ((RT_NULL == mempool_cb) || (mempool_cb->mp.parent.type != RT_Object_Class_MemPool))
+    if ((RT_NULL == mempool_cb) || (rt_object_get_type(&mempool_cb->mp.parent) != RT_Object_Class_MemPool))
     {
-      return 0;
+        return 0U;
     }
 
     return mempool_cb->mp.block_total_count;
@@ -1753,14 +1731,14 @@ uint32_t osMemoryPoolGetCapacity (osMemoryPoolId_t mp_id)
 /// Get memory block size in a Memory Pool.
 /// \param[in]     mp_id         memory pool ID obtained by \ref osMemoryPoolNew.
 /// \return memory block size in bytes.
-uint32_t osMemoryPoolGetBlockSize (osMemoryPoolId_t mp_id)
+uint32_t osMemoryPoolGetBlockSize(osMemoryPoolId_t mp_id)
 {
     mempool_cb_t *mempool_cb = (mempool_cb_t *)mp_id;
 
     /* Check parameters */
-    if ((RT_NULL == mempool_cb) || (mempool_cb->mp.parent.type != RT_Object_Class_MemPool))
+    if ((RT_NULL == mempool_cb) || (rt_object_get_type(&mempool_cb->mp.parent) != RT_Object_Class_MemPool))
     {
-      return 0;
+        return 0U;
     }
 
     return mempool_cb->mp.block_size;
@@ -1769,15 +1747,15 @@ uint32_t osMemoryPoolGetBlockSize (osMemoryPoolId_t mp_id)
 /// Get number of memory blocks used in a Memory Pool.
 /// \param[in]     mp_id         memory pool ID obtained by \ref osMemoryPoolNew.
 /// \return number of memory blocks used.
-uint32_t osMemoryPoolGetCount (osMemoryPoolId_t mp_id)
+uint32_t osMemoryPoolGetCount(osMemoryPoolId_t mp_id)
 {
-	rt_size_t used_blocks;
+    rt_size_t used_blocks;
     mempool_cb_t *mempool_cb = (mempool_cb_t *)mp_id;
 
     /* Check parameters */
-    if ((RT_NULL == mempool_cb) || (mempool_cb->mp.parent.type != RT_Object_Class_MemPool))
+    if ((RT_NULL == mempool_cb) || (rt_object_get_type(&mempool_cb->mp.parent) != RT_Object_Class_MemPool))
     {
-      return 0;
+        return 0U;
     }
 
     used_blocks = mempool_cb->mp.block_total_count - mempool_cb->mp.block_free_count;
@@ -1788,14 +1766,14 @@ uint32_t osMemoryPoolGetCount (osMemoryPoolId_t mp_id)
 /// Get number of memory blocks available in a Memory Pool.
 /// \param[in]     mp_id         memory pool ID obtained by \ref osMemoryPoolNew.
 /// \return number of memory blocks available.
-uint32_t osMemoryPoolGetSpace (osMemoryPoolId_t mp_id)
+uint32_t osMemoryPoolGetSpace(osMemoryPoolId_t mp_id)
 {
     mempool_cb_t *mempool_cb = (mempool_cb_t *)mp_id;
 
     /* Check parameters */
-    if ((RT_NULL == mempool_cb) || (mempool_cb->mp.parent.type != RT_Object_Class_MemPool))
+    if ((RT_NULL == mempool_cb) || (rt_object_get_type(&mempool_cb->mp.parent) != RT_Object_Class_MemPool))
     {
-      return 0;
+        return 0U;
     }
 
     return mempool_cb->mp.block_free_count;
@@ -1804,14 +1782,14 @@ uint32_t osMemoryPoolGetSpace (osMemoryPoolId_t mp_id)
 /// Delete a Memory Pool object.
 /// \param[in]     mp_id         memory pool ID obtained by \ref osMemoryPoolNew.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osMemoryPoolDelete (osMemoryPoolId_t mp_id)
+osStatus_t osMemoryPoolDelete(osMemoryPoolId_t mp_id)
 {
     mempool_cb_t *mempool_cb = (mempool_cb_t *)mp_id;
 
     /* Check parameters */
-    if ((RT_NULL == mempool_cb) || (mempool_cb->mp.parent.type != RT_Object_Class_MemPool))
+    if (RT_NULL == mempool_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     rt_mp_detach(&(mempool_cb->mp));
@@ -1824,26 +1802,28 @@ osStatus_t osMemoryPoolDelete (osMemoryPoolId_t mp_id)
 
     return osOK;
 }
+
 #endif
 
+#ifdef RT_USING_MESSAGEQUEUE
 //  ==== Message Queue Management Functions ====
 /// Create and Initialize a Message Queue object.
 /// \param[in]     msg_count     maximum number of messages in queue.
 /// \param[in]     msg_size      maximum message size in bytes.
 /// \param[in]     attr          message queue attributes; NULL: default values.
 /// \return message queue ID for reference by other functions or NULL in case of error.
-osMessageQueueId_t osMessageQueueNew (uint32_t msg_count, uint32_t msg_size, const osMessageQueueAttr_t *attr)
+osMessageQueueId_t osMessageQueueNew(uint32_t msg_count, uint32_t msg_size, const osMessageQueueAttr_t *attr)
 {
     char name[RT_NAME_MAX];
     mq_cb_t *mq_cb;
     void *mq_addr;
     rt_uint32_t mq_size;
-    static rt_uint16_t mq_number = 0;
+    static rt_uint16_t mq_number = 0U;
 
     /* Check parameters */
-    if ((0 == msg_count) || (0 == msg_size))
+    if ((0U == msg_count) || (0U == msg_size))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     if ((RT_NULL == attr) || (RT_NULL == attr->name))
@@ -1856,7 +1836,7 @@ osMessageQueueId_t osMessageQueueNew (uint32_t msg_count, uint32_t msg_size, con
     if ((RT_NULL == attr) || (RT_NULL == attr->cb_mem))
     {
         mq_cb = rt_malloc(sizeof(mq_cb_t));
-        if(RT_NULL == mq_cb)
+        if (RT_NULL == mq_cb)
             return RT_NULL;
         rt_memset(mq_cb, 0, sizeof(mq_cb_t));
         mq_cb->flags |= MALLOC_CB;
@@ -1890,11 +1870,11 @@ osMessageQueueId_t osMessageQueueNew (uint32_t msg_count, uint32_t msg_size, con
     }
     else
     {
-        mq_addr = (void*)(attr->mq_mem);
+        mq_addr = (void *)(attr->mq_mem);
         mq_size = attr->mq_size;
     }
 
-    rt_mq_init(&(mq_cb->mq), name, mq_addr, msg_size, mq_size,RT_IPC_FLAG_FIFO);
+    rt_mq_init(&(mq_cb->mq), name, mq_addr, msg_size, mq_size, RT_IPC_FLAG_FIFO);
 
     return mq_cb;
 }
@@ -1902,14 +1882,14 @@ osMessageQueueId_t osMessageQueueNew (uint32_t msg_count, uint32_t msg_size, con
 /// Get name of a Message Queue object.
 /// \param[in]     mq_id         message queue ID obtained by \ref osMessageQueueNew.
 /// \return name as NULL terminated string.
-const char *osMessageQueueGetName (osMessageQueueId_t mq_id)
+const char *osMessageQueueGetName(osMessageQueueId_t mq_id)
 {
-    mq_cb_t * mq_cb = (mq_cb_t *)mq_id;
+    mq_cb_t *mq_cb = (mq_cb_t *)mq_id;
 
     /* Check parameters */
-    if ((RT_NULL == mq_cb) || (mq_cb->mq.parent.parent.type != RT_Object_Class_MessageQueue))
+    if ((RT_NULL == mq_cb) || (rt_object_get_type(&mq_cb->mq.parent.parent) != RT_Object_Class_MessageQueue))
     {
-      return RT_NULL;
+        return RT_NULL;
     }
 
     return mq_cb->mq.parent.parent.name;
@@ -1921,19 +1901,18 @@ const char *osMessageQueueGetName (osMessageQueueId_t mq_id)
 /// \param[in]     msg_prio      message priority.
 /// \param[in]     timeout       \ref CMSIS_RTOS_TimeOutValue or 0 in case of no time-out.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osMessageQueuePut (osMessageQueueId_t mq_id, const void *msg_ptr, uint8_t msg_prio, uint32_t timeout)
+osStatus_t osMessageQueuePut(osMessageQueueId_t mq_id, const void *msg_ptr, uint8_t msg_prio, uint32_t timeout)
 {
     rt_err_t result;
-    mq_cb_t * mq_cb = (mq_cb_t *)mq_id;
+    mq_cb_t *mq_cb = (mq_cb_t *)mq_id;
 
     /* Check parameters */
-    if ((RT_NULL == mq_cb) || (mq_cb->mq.parent.parent.type != RT_Object_Class_MessageQueue)
-    	|| (RT_NULL == msg_ptr))
+    if (RT_NULL == mq_cb || (RT_NULL == msg_ptr))
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
-    result = rt_mq_send(&(mq_cb->mq), (void*)msg_ptr, mq_cb->init_msg_size);
+    result = rt_mq_send(&(mq_cb->mq), (void *)msg_ptr, mq_cb->init_msg_size);
 
     if (RT_EOK == result)
         return osOK;
@@ -1949,16 +1928,15 @@ osStatus_t osMessageQueuePut (osMessageQueueId_t mq_id, const void *msg_ptr, uin
 /// \param[out]    msg_prio      pointer to buffer for message priority or NULL.
 /// \param[in]     timeout       \ref CMSIS_RTOS_TimeOutValue or 0 in case of no time-out.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osMessageQueueGet (osMessageQueueId_t mq_id, void *msg_ptr, uint8_t *msg_prio, uint32_t timeout)
+osStatus_t osMessageQueueGet(osMessageQueueId_t mq_id, void *msg_ptr, uint8_t *msg_prio, uint32_t timeout)
 {
     rt_err_t result;
-    mq_cb_t * mq_cb = (mq_cb_t *)mq_id;
+    mq_cb_t *mq_cb = (mq_cb_t *)mq_id;
 
     /* Check parameters */
-    if ((RT_NULL == mq_cb) || (mq_cb->mq.parent.parent.type != RT_Object_Class_MessageQueue)
-    	|| (RT_NULL == msg_ptr))
+    if (RT_NULL == mq_cb || (RT_NULL == msg_ptr))
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
     result = rt_mq_recv(&(mq_cb->mq), msg_ptr, mq_cb->init_msg_size, timeout);
 
@@ -1966,7 +1944,7 @@ osStatus_t osMessageQueueGet (osMessageQueueId_t mq_id, void *msg_ptr, uint8_t *
         return osOK;
     else if (-RT_ETIMEOUT == result)
     {
-        if (0 == timeout)
+        if (0U == timeout)
             return osErrorResource;
         return osErrorTimeout;
     }
@@ -1977,14 +1955,14 @@ osStatus_t osMessageQueueGet (osMessageQueueId_t mq_id, void *msg_ptr, uint8_t *
 /// Get maximum number of messages in a Message Queue.
 /// \param[in]     mq_id         message queue ID obtained by \ref osMessageQueueNew.
 /// \return maximum number of messages.
-uint32_t osMessageQueueGetCapacity (osMessageQueueId_t mq_id)
+uint32_t osMessageQueueGetCapacity(osMessageQueueId_t mq_id)
 {
-    mq_cb_t * mq_cb = (mq_cb_t *)mq_id;
+    mq_cb_t *mq_cb = (mq_cb_t *)mq_id;
 
     /* Check parameters */
-    if ((RT_NULL == mq_cb) || (mq_cb->mq.parent.parent.type != RT_Object_Class_MessageQueue))
+    if ((RT_NULL == mq_cb) || (rt_object_get_type(&mq_cb->mq.parent.parent) != RT_Object_Class_MessageQueue))
     {
-      return 0;
+        return 0U;
     }
 
     return mq_cb->mq.max_msgs;
@@ -1993,33 +1971,30 @@ uint32_t osMessageQueueGetCapacity (osMessageQueueId_t mq_id)
 /// Get maximum message size in a Memory Pool.
 /// \param[in]     mq_id         message queue ID obtained by \ref osMessageQueueNew.
 /// \return maximum message size in bytes.
-uint32_t osMessageQueueGetMsgSize (osMessageQueueId_t mq_id)
+uint32_t osMessageQueueGetMsgSize(osMessageQueueId_t mq_id)
 {
-    rt_uint32_t max_size;
-    mq_cb_t * mq_cb = (mq_cb_t *)mq_id;
+    mq_cb_t *mq_cb = (mq_cb_t *)mq_id;
 
     /* Check parameters */;
-    if ((RT_NULL == mq_cb) || (mq_cb->mq.parent.parent.type != RT_Object_Class_MessageQueue))
+    if ((RT_NULL == mq_cb) || (rt_object_get_type(&mq_cb->mq.parent.parent) != RT_Object_Class_MessageQueue))
     {
-      return 0;
+        return 0U;
     }
 
-    max_size = mq_cb->mq.max_msgs * mq_cb->mq.msg_size;
-
-    return max_size;
+    return mq_cb->mq.msg_size;
 }
 
 /// Get number of queued messages in a Message Queue.
 /// \param[in]     mq_id         message queue ID obtained by \ref osMessageQueueNew.
 /// \return number of queued messages.
-uint32_t osMessageQueueGetCount (osMessageQueueId_t mq_id)
+uint32_t osMessageQueueGetCount(osMessageQueueId_t mq_id)
 {
-    mq_cb_t * mq_cb = (mq_cb_t *)mq_id;
+    mq_cb_t *mq_cb = (mq_cb_t *)mq_id;
 
     /* Check parameters */;
-    if ((RT_NULL == mq_cb) || (mq_cb->mq.parent.parent.type != RT_Object_Class_MessageQueue))
+    if ((RT_NULL == mq_cb) || (rt_object_get_type(&mq_cb->mq.parent.parent) != RT_Object_Class_MessageQueue))
     {
-      return 0;
+        return 0U;
     }
 
     return mq_cb->mq.entry;
@@ -2028,14 +2003,14 @@ uint32_t osMessageQueueGetCount (osMessageQueueId_t mq_id)
 /// Get number of available slots for messages in a Message Queue.
 /// \param[in]     mq_id         message queue ID obtained by \ref osMessageQueueNew.
 /// \return number of available slots for messages.
-uint32_t osMessageQueueGetSpace (osMessageQueueId_t mq_id)
+uint32_t osMessageQueueGetSpace(osMessageQueueId_t mq_id)
 {
-    mq_cb_t * mq_cb  = (mq_cb_t *)mq_id;
+    mq_cb_t *mq_cb  = (mq_cb_t *)mq_id;
 
     /* Check parameters */;
-    if ((RT_NULL == mq_cb) || (mq_cb->mq.parent.parent.type != RT_Object_Class_MessageQueue))
+    if ((RT_NULL == mq_cb) || (rt_object_get_type(&mq_cb->mq.parent.parent) != RT_Object_Class_MessageQueue))
     {
-      return 0;
+        return 0U;
     }
 
     return (mq_cb->mq.max_msgs - mq_cb->mq.entry);
@@ -2044,15 +2019,15 @@ uint32_t osMessageQueueGetSpace (osMessageQueueId_t mq_id)
 /// Reset a Message Queue to initial empty state.
 /// \param[in]     mq_id         message queue ID obtained by \ref osMessageQueueNew.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osMessageQueueReset (osMessageQueueId_t mq_id)
+osStatus_t osMessageQueueReset(osMessageQueueId_t mq_id)
 {
     rt_err_t result;
-    mq_cb_t * mq_cb = (mq_cb_t *)mq_id;
+    mq_cb_t *mq_cb = (mq_cb_t *)mq_id;
 
     /* Check parameters */;
-    if ((RT_NULL == mq_cb) || (mq_cb->mq.parent.parent.type != RT_Object_Class_MessageQueue))
+    if (RT_NULL == mq_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     result = rt_mq_control(&(mq_cb->mq), RT_IPC_CMD_RESET, RT_NULL);
@@ -2066,14 +2041,14 @@ osStatus_t osMessageQueueReset (osMessageQueueId_t mq_id)
 /// Delete a Message Queue object.
 /// \param[in]     mq_id         message queue ID obtained by \ref osMessageQueueNew.
 /// \return status code that indicates the execution status of the function.
-osStatus_t osMessageQueueDelete (osMessageQueueId_t mq_id)
+osStatus_t osMessageQueueDelete(osMessageQueueId_t mq_id)
 {
-    mq_cb_t * mq_cb = (mq_cb_t *)mq_id;
+    mq_cb_t *mq_cb = (mq_cb_t *)mq_id;
 
     /* Check parameters */;
-    if ((RT_NULL == mq_cb) || (mq_cb->mq.parent.parent.type != RT_Object_Class_MessageQueue))
+    if (RT_NULL == mq_cb)
     {
-      return osErrorParameter;
+        return osErrorParameter;
     }
 
     rt_mq_detach(&(mq_cb->mq));
@@ -2086,3 +2061,5 @@ osStatus_t osMessageQueueDelete (osMessageQueueId_t mq_id)
 
     return osOK;
 }
+
+#endif
