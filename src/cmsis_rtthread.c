@@ -210,6 +210,7 @@ uint32_t osKernelGetSysTimerFreq(void)
 /// \param[in]     argument      pointer that is passed to the thread function as start argument.
 /// \param[in]     attr          thread attributes; NULL: default values.
 /// \return thread ID for reference by other functions or NULL in case of error.
+/// \attention     cmsis rtos2 priority is 0-56 and the max number have max priority so th-thread max priority must be larger than 56
 osThreadId_t osThreadNew(osThreadFunc_t func, void *argument, const osThreadAttr_t *attr)
 {
     void *stack;
@@ -284,7 +285,11 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument, const osThreadAttr
     if ((RT_NULL != attr) && (0 != attr->attr_bits))
         thread_cb->flags |= attr->attr_bits;
 
-    rtt_prio = (osPriorityISR - thread_cb->prio) * RT_THREAD_PRIORITY_MAX / osPriorityISR;
+    if (thread_cb->prio != osPriorityISR)
+        rtt_prio = RT_THREAD_PRIORITY_MAX - thread_cb->prio;
+    else
+        rtt_prio = 0;
+
     rt_thread_init(&(thread_cb->thread), name, func, argument, stack, stack_size, rtt_prio, DEFAULT_TICK);
 
     if (thread_cb->flags & osThreadJoinable)
@@ -431,8 +436,12 @@ osStatus_t osThreadSetPriority(osThreadId_t thread_id, osPriority_t priority)
     }
 
     thread_cb->prio = priority;
-    rt_priority = (osPriorityISR - thread_cb->prio) * RT_THREAD_PRIORITY_MAX / osPriorityISR;
-
+    
+    if (thread_cb->prio != osPriorityISR)
+        rt_priority = RT_THREAD_PRIORITY_MAX - thread_cb->prio;
+    else
+        rt_priority = 0;
+    
     rt_thread_control(&(thread_cb->thread), RT_THREAD_CTRL_CHANGE_PRIORITY, &rt_priority);
 
     return osOK;
@@ -444,14 +453,24 @@ osStatus_t osThreadSetPriority(osThreadId_t thread_id, osPriority_t priority)
 osPriority_t osThreadGetPriority(osThreadId_t thread_id)
 {
     thread_cb_t *thread_cb = (thread_cb_t *)thread_id;
-
+    uint8_t get_priority = 0;
+    
     /* Check parameters */
     if ((RT_NULL == thread_cb) || (rt_object_get_type((rt_object_t)(&thread_cb->thread)) != RT_Object_Class_Thread))
     {
         return osPriorityError;
     }
 
-    return (osPriority_t)thread_cb->prio;
+    get_priority = thread_cb->thread.current_priority;
+    
+    if (get_priority !=0)
+    {
+        return (osPriority_t)(RT_THREAD_PRIORITY_MAX - get_priority);
+    }
+    else
+    {
+        return osPriorityISR;
+    }
 }
 
 /// Pass control to next thread that is in state \b READY.
