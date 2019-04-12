@@ -11,7 +11,7 @@
 
 #include <cmsis_os2.h>
 #include "cmsis_rtthread.h"
-
+#include "board.h"
 #include <rthw.h>
 
 /// Kernel Information
@@ -187,6 +187,13 @@ uint32_t osKernelGetTickFreq(void)
 {
 
     return RT_TICK_PER_SECOND;
+}
+
+/// The function osKernelGetSysTimerCount returns the current RTOS kernel system timer as a 32-bit value.
+/// \return RTOS kernel current system timer count as 32-bit value.
+uint32_t osKernelGetSysTimerCount(void)
+{
+    return (uint32_t)SysTick->VAL;
 }
 
 /// Get the RTOS kernel system timer frequency.
