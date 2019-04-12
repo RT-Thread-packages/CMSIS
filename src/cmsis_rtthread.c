@@ -37,12 +37,29 @@ static void thread_cleanup(rt_thread_t thread)
 {
     thread_cb_t *thread_cb;
     thread_cb = (thread_cb_t *)(thread->user_data);
-
+    
     /* clear cleanup function */
     thread->cleanup = RT_NULL;
+    
     if (thread_cb->flags & osThreadJoinable)
     {
-        rt_sem_release(thread_cb->joinable_sem);
+        if (!rt_list_isempty(&(thread_cb->joinable_sem->parent.suspend_thread)))
+        {
+            rt_sem_release(thread_cb->joinable_sem);
+            return;
+        }
+        else
+        {
+            rt_sem_delete(thread_cb->joinable_sem);
+            
+            if (thread_cb->flags & MALLOC_STACK)
+                rt_free(thread_cb->thread.stack_addr);
+
+            if (thread_cb->flags & MALLOC_CB)
+                rt_free(thread_cb);
+            
+            return;
+        }
     }
     else
     {
@@ -51,6 +68,8 @@ static void thread_cleanup(rt_thread_t thread)
 
         if (thread_cb->flags & MALLOC_CB)
             rt_free(thread_cb);
+        
+        return;
     }
 }
 
