@@ -34,8 +34,8 @@ if GetDepend('PKG_CMSIS_NN'):
         src += nn_softmax_src
 
 if GetDepend('PKG_CMSIS_RTOS2'):
-    CPPPATH = CPPPATH + [cwd + '/CMSIS_5/CMSIS/RTOS2/Include',cwd + '/src']
-    src = src + Glob('src/*.c')
+    CPPPATH = CPPPATH + [cwd + '/CMSIS_5/CMSIS/RTOS2/Include',cwd + '/RTOS2/RT-Thread/src']
+    src = src + Glob('RTOS2/RT-Thread/src/*.c')
 
 # Definitions for MATH
 if GetDepend('ARCH_ARM_CORTEX_M7'):
