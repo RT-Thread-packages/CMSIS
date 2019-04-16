@@ -2,10 +2,10 @@
  * @file     os_systick.c
  * @brief    CMSIS OS Tick SysTick implementation
  * @version  V1.0.1
- * @date     24. November 2017
+ * @date     29. November 2017
  ******************************************************************************/
 /*
- * Copyright (c) 2017-2017 ARM Limited. All rights reserved.
+ * Copyright (c) 2017-2017 Arm Limited. All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -23,11 +23,13 @@
  */
 
 #include "os_tick.h"
-
-//lint -emacro((923,9078),SCB,SysTick) "cast from unsigned long to pointer"
 #include "board.h"
 
 #ifdef  SysTick
+
+#ifndef SYSTICK_IRQ_PRIORITY
+#define SYSTICK_IRQ_PRIORITY    0xFFU
+#endif
 
 static uint8_t PendST;
 
@@ -37,15 +39,15 @@ RT_WEAK int32_t OS_Tick_Setup (uint32_t freq, IRQHandler_t handler) {
   (void)handler;
 
   if (freq == 0U) {
-    //lint -e{904} "Return statement before end of function"
     return (-1);
   }
 
   load = (SystemCoreClock / freq) - 1U;
   if (load > 0x00FFFFFFU) {
-    //lint -e{904} "Return statement before end of function"
     return (-1);
   }
+
+  NVIC_SetPriority(SysTick_IRQn, SYSTICK_IRQ_PRIORITY);
 
   SysTick->CTRL =  SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_TICKINT_Msk;
   SysTick->LOAD =  load;
