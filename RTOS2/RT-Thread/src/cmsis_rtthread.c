@@ -11,7 +11,8 @@
 
 #include <cmsis_os2.h>
 #include "cmsis_rtthread.h"
-
+#include "board.h"
+#include "os_tick.h"
 #include <rthw.h>
 
 /// Kernel Information
@@ -55,6 +56,66 @@ static void thread_cleanup(rt_thread_t thread)
 }
 
 //  ==== Kernel Management Functions ====
+
+//  ==== Helper functions ====
+/// Block Kernel (disable: thread switching, time tick, post ISR processing).
+#ifdef SysTick
+
+static volatile uint8_t          blocked;  ///< Blocked
+static uint8_t                    pendSV;  ///< Pending SV
+
+/// Get Pending SV (Service Call) Flag
+/// \return     Pending SV Flag
+__STATIC_INLINE uint8_t GetPendSV (void) 
+{
+    return ((uint8_t)((SCB->ICSR & (SCB_ICSR_PENDSVSET_Msk)) >> 24));
+}
+
+/// Clear Pending SV (Service Call) Flag
+__STATIC_INLINE void ClrPendSV (void) 
+{
+    SCB->ICSR = SCB_ICSR_PENDSVCLR_Msk;
+}
+
+/// Set Pending SV (Service Call) Flag
+__STATIC_INLINE void SetPendSV (void) 
+{
+    SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
+}
+
+/// Block Kernel (disable: thread switching, time tick, post ISR processing).
+static void KernelBlock (void) 
+{
+
+    OS_Tick_Disable();
+
+    blocked = 1U;
+    __DSB();
+
+    if (GetPendSV() != 0U) 
+    {
+        ClrPendSV();
+        pendSV = 1U;
+    }
+}
+
+/// Unblock Kernel
+static void KernelUnblock (void)
+{
+
+    blocked = 0U;
+    __DSB();
+
+    if (pendSV != 0U) 
+    {
+        pendSV = 0U;
+        SetPendSV();
+    }
+
+    OS_Tick_Enable();
+}
+
+#endif
 
 /// Initialize the RTOS Kernel.
 /// \return status code that indicates the execution status of the function.
@@ -189,12 +250,154 @@ uint32_t osKernelGetTickFreq(void)
     return RT_TICK_PER_SECOND;
 }
 
+/// The function returns the current RTOS kernel system timer as a 32-bit value.
+/// \return RTOS kernel current system timer count as 32-bit value
+#ifdef SysTick
+
+uint32_t osKernelGetSysTimerCount(void)	
+{
+    uint32_t irqmask ;
+    rt_tick_t ticks;
+    uint32_t val;
+
+    irqmask = rt_hw_interrupt_disable();
+
+    ticks = rt_tick_get();
+    val   = OS_Tick_GetCount();
+
+    if (OS_Tick_GetOverflow() != 0U) 
+    {
+        val = OS_Tick_GetCount();
+        ticks++;
+    }
+    
+    val += ticks * OS_Tick_GetInterval();
+    rt_hw_interrupt_enable(irqmask);
+
+    return (val);
+}
+
+#endif    /*SysTick*/
+
+
+
 /// Get the RTOS kernel system timer frequency.
 /// \return frequency of the system timer.
 uint32_t osKernelGetSysTimerFreq(void)
 {
     return RT_TICK_PER_SECOND;
 }
+
+/// Suspend the RTOS Kernel scheduler.
+/// \return time in ticks, for how long the system can sleep or power-down.
+#ifdef SysTick
+
+uint32_t osKernelSuspend (void)
+{
+    rt_thread_t thread;
+    rt_timer_t timer;
+    struct rt_object_information *info_thread;
+    struct rt_object_information *info_timer;
+    struct rt_list_node *node;
+    rt_uint8_t timer_index = 0;
+    rt_tick_t min_tick = 0;
+    rt_tick_t cur_tick = 0;
+    rt_tick_t temp_tick = 0;
+
+	if (kernel_state != osKernelRunning)
+	{
+		return 0U;
+	}
+    
+    info_thread = rt_object_get_information(RT_Object_Class_Thread);
+    info_timer = rt_object_get_information(RT_Object_Class_Timer);
+    
+    KernelBlock();
+    
+    min_tick = osWaitForever;
+    
+    cur_tick = rt_tick_get();
+    
+    /*check thread delay list*/
+    if (info_thread != NULL)
+    {
+        for (node = info_thread->object_list.next; node != &(info_thread->object_list); node = node->next)
+        {
+            thread = rt_list_entry(node, struct rt_thread, list);
+
+            if (thread->thread_timer.parent.flag & RT_TIMER_FLAG_ACTIVATED)
+            {
+                temp_tick = thread->thread_timer.timeout_tick - cur_tick;
+
+                if (temp_tick < min_tick)
+                {
+                    min_tick = temp_tick;
+                }
+            }
+        }
+    }
+    
+    /*check active timer list*/
+    if (info_timer != NULL)
+    {
+        for (node = info_timer->object_list.next; node != &(info_timer->object_list); node = node->next)
+        {
+            timer = rt_list_entry(node, struct rt_timer, row[timer_index++]);
+            
+            if (timer->parent.flag & RT_TIMER_FLAG_ACTIVATED)
+            {
+                temp_tick = timer->timeout_tick - cur_tick;
+                
+                if (temp_tick < min_tick)
+                {
+                    min_tick = temp_tick;
+                }
+            }
+        }
+    }
+
+    if (osWaitForever == min_tick)
+        min_tick = 0U;
+
+    kernel_state = osKernelSuspended;
+
+    return (min_tick);
+}
+#endif /* SysTick */
+
+/// Resume the RTOS Kernel scheduler.
+/// \param[in]     sleep_ticks   time in ticks for how long the system was in sleep or power-down mode.
+#ifdef SysTick
+
+void osKernelResume (uint32_t sleep_ticks)
+{
+    rt_tick_t delay_tick = 0;
+
+    if (kernel_state != osKernelSuspended)
+    {
+        return;
+    }
+
+    delay_tick = (rt_tick_t)sleep_ticks;
+    
+    rt_enter_critical();
+    
+    while(delay_tick > 0)
+    {
+        rt_tick_increase();   /*Process Thread Delay list and  Process Active Timer list*/
+        delay_tick --;
+    }
+    
+    rt_exit_critical();
+    
+    kernel_state = osKernelRunning;
+    
+    KernelUnblock();
+    
+    return;
+}
+
+#endif
 
 //  ==== Thread Management Functions ====
 
