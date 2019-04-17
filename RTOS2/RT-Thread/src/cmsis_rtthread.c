@@ -825,15 +825,11 @@ uint32_t osThreadGetCount(void)
 {
     rt_uint32_t thread_count = 0U;
     struct rt_object_information *info;
-    struct rt_list_node *node;
 
     info = rt_object_get_information(RT_Object_Class_Thread);
 
     rt_enter_critical();
-    for (node = info->object_list.next; node != &(info->object_list); node = node->next)
-    {
-        thread_count++;
-    }
+    thread_count = rt_list_len(&(info->object_list));
     rt_exit_critical();
 
     return thread_count;
