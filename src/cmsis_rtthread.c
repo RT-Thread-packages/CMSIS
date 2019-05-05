@@ -942,7 +942,7 @@ osTimerId_t osTimerNew(osTimerFunc_t func, osTimerType_t type, void *argument, c
     timer_cb_t *timer_cb;
     char name[RT_NAME_MAX];
     static rt_uint16_t timer_number = 0U;
-    rt_uint8_t flag = RT_TIMER_FLAG_SOFT_TIMER;
+    rt_uint8_t flag = RT_TIMER_FLAG_HARD_TIMER;
 
     /* Check parameters */
     if ((RT_NULL == func) || ((type != osTimerOnce) && (type != osTimerPeriodic)))
