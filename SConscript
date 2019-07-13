@@ -13,7 +13,7 @@ if GetDepend('PKG_CMSIS_CORE'):
 if GetDepend('PKG_CMSIS_NN'):
     CPPPATH = CPPPATH + [cwd + '/CMSIS_5/CMSIS/NN/Include']
 
-    nn_activation_src = Glob('CMSIS_5/CMSIS/NN/Source/ActivationFunction/*.c')
+    nn_activation_src = Glob('CMSIS_5/CMSIS/NN/Source/ActivationFunctions/*.c')
     nn_convolution_src = Glob('CMSIS_5/CMSIS/NN/Source/ConvolutionFunctions/*.c')
     nn_fully_connected_src = Glob('CMSIS_5/CMSIS/NN/Source/FullyConnectedFunctions/*.c')
     nn_support_src = Glob('CMSIS_5/CMSIS/NN/Source/NNSupportFunctions/*.c')
