@@ -22,6 +22,7 @@
  * limitations under the License.
  */
 
+#include <rtthread.h>
 #include "os_tick.h"
 #include "board.h"
 
