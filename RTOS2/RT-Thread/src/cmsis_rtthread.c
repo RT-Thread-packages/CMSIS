@@ -717,10 +717,12 @@ osStatus_t osThreadDetach(osThreadId_t thread_id)
     }
 
     /* Check object attributes */
+    /*
     if ((thread_cb->flags & osThreadJoinable) == 0)
     {
         return osErrorResource;
     }
+    */
 
     if ((thread_cb->thread.stat & RT_THREAD_STAT_MASK) == RT_THREAD_CLOSE)
     {
@@ -738,11 +740,20 @@ osStatus_t osThreadDetach(osThreadId_t thread_id)
     else
     {
         rt_enter_critical();
+
         /* change to detach state */
         thread_cb->flags &= ~osThreadJoinable;
+
         /* delete joinable semaphore */
-        rt_sem_delete(thread_cb->joinable_sem);
-        thread_cb->joinable_sem = RT_NULL;
+        if (RT_NULL != thread_cb->joinable_sem)
+	{
+	    rt_sem_delete(thread_cb->joinable_sem);
+            thread_cb->joinable_sem = RT_NULL;
+	}
+	    
+        /* detach thread object */
+	rt_thread_detach(&thread_cb->thread);
+	    
         rt_exit_critical();
     }
 
